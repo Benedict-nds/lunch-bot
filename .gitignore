@@ -1,0 +1,58 @@
+# Ignore all files in the __pycache__ directory
+__pycache__/
+
+# Ignore all .pyc files
+*.pyc
+
+# Ignore all .pyo files
+*.pyo
+
+# Ignore all .pyd files
+*.pyd
+
+# Ignore all .DS_Store files (common on macOS)
+.DS_Store
+
+# Ignore all virtual environment directories
+venv/
+env/
+.venv/
+env.bak/
+env_old/
+
+# Ignore all log files
+*.log
+
+# Ignore all temporary files
+*.tmp
+
+# Ignore all build directories
+build/
+dist/
+dist-info/
+*.egg-info/
+
+# Ignore all IDE-specific files and directories
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-settings
+*.sublime-workspace
+
+# Ignore all configuration files
+*.conf
+*.ini
+*.cfg
+
+# Ignore all database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Ignore all temporary build files
+*.swp
+*.swo
+*.swn
+
+# Ignore all secret files
+*.env
