@@ -1,18 +1,15 @@
-"""All Claude calls live here: menu parsing and order parsing."""
+"""All Claude and Openai calls live here: menu parsing and order parsing."""
 import json
 import os
 import re
 from openai import OpenAI
 
-MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1")
+MODEL = os.getenv("OPENAI_MODEL", "gpt-5-nano")
 _client = None
 
 def _get_client():
-
     global _client
-
     if _client is None:
-
         _client = OpenAI()  # reads OPENAI_API_KEY from .env
 
     return _client
