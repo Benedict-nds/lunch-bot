@@ -1,51 +1,110 @@
+import asyncio
+import csv
 import hashlib
 import hmac
+import json
 import os
 from typing import Optional
 
-import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request, Response
+from starlette.concurrency import run_in_threadpool
 
 load_dotenv()
 
-VERIFY_TOKEN = os.environ["VERIFY_TOKEN"]
-# These arrive after the other person finishes the Meta setup, so the server
-# must still start (and pass webhook verification) without them.
-ACCESS_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
-PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "")
-APP_SECRET = os.getenv("APP_SECRET", "")  # optional while testing
-GRAPH_VERSION = os.getenv("GRAPH_VERSION", "v21.0")
+import db  # noqa: E402
+import logic  # noqa: E402
+import wa  # noqa: E402
+
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
+APP_SECRET = os.getenv("APP_SECRET", "")          # only if the provider signs webhooks Meta-style
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")  # add ?secret=... to the callback URL
+HR_NUMBERS = {wa.normalize_phone(n) for n in os.getenv("HR_NUMBERS", "").split(",") if n.strip()}
+TEMPLATE_ID = os.getenv("TEMPLATE_ID", "")        # from: python check_setup.py templates
+DEBUG = os.getenv("DEBUG_WEBHOOK", "1") == "1"    # print raw inbound payloads while we learn the format
 
 app = FastAPI()
+db.init()
+_seen_ids = set()  # providers retry webhooks; don't process the same message twice
 
 
-async def send_text(to: str, body: str) -> None:
-    """Send a free-form text message (only works inside the 24h window,
-    i.e. after the person has messaged the bot)."""
-    if not ACCESS_TOKEN or not PHONE_NUMBER_ID:
-        print("SEND skipped: WHATSAPP_TOKEN / PHONE_NUMBER_ID not set yet")
-        return
-    url = f"https://graph.facebook.com/{GRAPH_VERSION}/{PHONE_NUMBER_ID}/messages"
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "text",
-        "text": {"body": body},
-    }
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.post(url, json=payload, headers=headers)
-    print("SEND", r.status_code, r.text)
+def load_staff_csv(path="staff.csv"):
+    if not os.path.exists(path):
+        return 0
+    n = 0
+    with open(path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            phone = wa.normalize_phone(row.get("phone"))
+            if phone:
+                db.upsert_staff(phone, (row.get("name") or "").strip())
+                n += 1
+    return n
 
 
 def valid_signature(raw_body: bytes, header: Optional[str]) -> bool:
     if not APP_SECRET:
-        return True  # skipped in early dev; set APP_SECRET before going live
+        return True
     if not header or not header.startswith("sha256="):
         return False
     expected = hmac.new(APP_SECRET.encode(), raw_body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, header.split("=", 1)[1])
+
+
+def _text_of(msg):
+    t = msg.get("type")
+    if t == "text":
+        return (msg.get("text") or {}).get("body")
+    if t == "button":  # tap on a template quick-reply button
+        b = msg.get("button") or {}
+        return b.get("text") or b.get("payload")
+    if t == "interactive":
+        i = msg.get("interactive") or {}
+        r = i.get("button_reply") or i.get("list_reply") or {}
+        return r.get("title") or r.get("id")
+    return None
+
+
+def extract_messages(data):
+    """Reads Meta-style webhook payloads (what WhatsApp providers usually forward)."""
+    out = []
+    for entry in data.get("entry", []):
+        for change in entry.get("changes", []):
+            value = change.get("value", {})
+            names = {c.get("wa_id"): (c.get("profile") or {}).get("name") for c in value.get("contacts", [])}
+            for msg in value.get("messages", []):
+                sender = msg.get("from", "")
+                out.append((msg.get("id", ""), sender, names.get(sender), _text_of(msg)))
+    return out
+
+
+async def broadcast_menu_prompt() -> str:
+    if not await run_in_threadpool(db.get_menu, logic.today()):
+        return "Send today's menu first (Menu: ...), then reply Send."
+    if not TEMPLATE_ID:
+        return "The broadcast template isn't set up yet (TEMPLATE_ID). Staff can still text 'menu' to the bot."
+    staff = await run_in_threadpool(db.get_staff)
+    if not staff:
+        return "No staff loaded yet (staff.csv)."
+    for s in staff:
+        await wa.send_template(s["phone"], TEMPLATE_ID, [s["name"] or "there"])
+        await asyncio.sleep(0.2)
+    return f"Menu prompt sent to {len(staff)} staff."
+
+
+async def handle_hr(text: str) -> str:
+    lower = text.strip().lower()
+    if lower.startswith("menu"):
+        raw = text.strip()[4:].lstrip(" :\n")
+        if not raw:
+            return "Send it like this:\nMenu: <paste today's menu>"
+        items = await run_in_threadpool(logic.set_menu, raw)
+        return ("Menu saved ✅\n\n" + logic.format_menu(items)
+                + "\n\nReply 'Send' to send it to all staff, or 'Summary' to see orders so far.")
+    if lower.startswith("summary"):
+        return await run_in_threadpool(logic.build_summary)
+    if lower.startswith("send"):
+        return await broadcast_menu_prompt()
+    return "HR commands:\n• Menu: <menu text>\n• Send\n• Summary"
 
 
 @app.get("/webhook")
@@ -54,130 +113,72 @@ async def verify(
     token: Optional[str] = Query(None, alias="hub.verify_token"),
     challenge: Optional[str] = Query(None, alias="hub.challenge"),
 ):
-    """Meta calls this once when you save the webhook in the dashboard."""
-    if mode == "subscribe" and token == VERIFY_TOKEN and challenge:
+    """Meta-style verification handshake (kept in case the provider uses it)."""
+    if mode == "subscribe" and VERIFY_TOKEN and token == VERIFY_TOKEN and challenge:
         return Response(content=challenge, media_type="text/plain")
     raise HTTPException(status_code=403, detail="Verification failed")
 
 
 @app.post("/webhook")
-async def receive(request: Request):
+async def receive(request: Request, secret: Optional[str] = Query(None)):
+    if WEBHOOK_SECRET and secret != WEBHOOK_SECRET:
+        raise HTTPException(status_code=403, detail="Bad secret")
     raw = await request.body()
     if not valid_signature(raw, request.headers.get("X-Hub-Signature-256")):
         raise HTTPException(status_code=403, detail="Bad signature")
+    try:
+        data = json.loads(raw or b"{}")
+    except ValueError:
+        return {"status": "ignored"}
+    if DEBUG:
+        print("RAW", json.dumps(data, ensure_ascii=False)[:1500])
 
-    data = await request.json()
-    for entry in data.get("entry", []):
-        for change in entry.get("changes", []):
-            value = change.get("value", {})
-            names = {
-                c.get("wa_id"): c.get("profile", {}).get("name")
-                for c in value.get("contacts", [])
-            }
-            for msg in value.get("messages", []):
-                sender = msg["from"]  # phone number in international format
-                name = names.get(sender)
-                if msg.get("type") == "text":
-                    text = msg["text"]["body"]
-                    print(f"IN  {name} ({sender}): {text}")
-                    # Step 1 only: echo back to prove the round trip works.
-                    await send_text(sender, f"Got it: {text}")
-                else:
-                    print(f"IN  {name} ({sender}): unsupported type {msg.get('type')}")
+    for msg_id, sender, profile_name, text in extract_messages(data):
+        if msg_id and msg_id in _seen_ids:
+            continue
+        _seen_ids.add(msg_id)
+        sender = wa.normalize_phone(sender)
+        if not text:
+            await wa.send_text(sender, "Sorry, I can only read text messages. Please type your order.")
+            continue
+        print(f"IN  {profile_name} ({sender}): {text}")
+        try:
+            if sender in HR_NUMBERS:
+                reply = await handle_hr(text)
+            else:
+                await run_in_threadpool(db.ensure_staff, sender, profile_name or sender)
+                name = await run_in_threadpool(db.staff_name, sender) or profile_name or sender
+                reply = await run_in_threadpool(logic.handle_staff_reply, sender, name, text)
+        except Exception as e:  # never let one bad message crash the webhook
+            print("ERROR", repr(e))
+            reply = "Sorry, something went wrong on my side. Please try again or tell HR."
+        await wa.send_text(sender, reply)
 
-    # Always return 200 quickly or Meta will retry.
-    return {"status": "ok"}
+    return {"status": "ok"}  # always answer 200 quickly or the provider retries
+
+
+async def summary_scheduler():
+    """At the cutoff time, push the summary to HR (once per day)."""
+    while True:
+        await asyncio.sleep(30)
+        try:
+            day = logic.today()
+            key = f"summary_sent:{day}"
+            if 0 <= logic.minutes_since_cutoff() < 10 and not db.get_flag(key) and db.get_menu(day):
+                db.set_flag(key, "1")
+                text = await run_in_threadpool(logic.build_summary)
+                for hr in HR_NUMBERS:
+                    await wa.send_text(hr, text)
+        except Exception as e:
+            print("SCHEDULER ERROR", repr(e))
+
+
+@app.on_event("startup")
+async def startup():
+    print("Staff loaded from staff.csv:", load_staff_csv())
+    asyncio.create_task(summary_scheduler())
 
 
 @app.get("/")
 async def health():
     return {"ok": True}
-# import hashlib
-# import hmac
-# import os
-# from typing import Optional
-
-# import httpx
-# from dotenv import load_dotenv
-# from fastapi import FastAPI, HTTPException, Query, Request, Response
-
-# load_dotenv()
-
-# VERIFY_TOKEN = os.environ["VERIFY_TOKEN"]
-# ACCESS_TOKEN = os.environ["WHATSAPP_TOKEN"]
-# PHONE_NUMBER_ID = os.environ["PHONE_NUMBER_ID"]
-# APP_SECRET = os.getenv("APP_SECRET", "")  # optional while testing
-# GRAPH_VERSION = os.getenv("GRAPH_VERSION", "v21.0")
-
-# app = FastAPI()
-
-
-# async def send_text(to: str, body: str) -> None:
-#     """Send a free-form text message (only works inside the 24h window,
-#     i.e. after the person has messaged the bot)."""
-#     url = f"https://graph.facebook.com/{GRAPH_VERSION}/{PHONE_NUMBER_ID}/messages"
-#     payload = {
-#         "messaging_product": "whatsapp",
-#         "to": to,
-#         "type": "text",
-#         "text": {"body": body},
-#     }
-#     headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
-#     async with httpx.AsyncClient(timeout=15) as client:
-#         r = await client.post(url, json=payload, headers=headers)
-#     print("SEND", r.status_code, r.text)
-
-
-# def valid_signature(raw_body: bytes, header: Optional[str]) -> bool:
-#     if not APP_SECRET:
-#         return True  # skipped in early dev; set APP_SECRET before going live
-#     if not header or not header.startswith("sha256="):
-#         return False
-#     expected = hmac.new(APP_SECRET.encode(), raw_body, hashlib.sha256).hexdigest()
-#     return hmac.compare_digest(expected, header.split("=", 1)[1])
-
-
-# @app.get("/webhook")
-# async def verify(
-#     mode: Optional[str] = Query(None, alias="hub.mode"),
-#     token: Optional[str] = Query(None, alias="hub.verify_token"),
-#     challenge: Optional[str] = Query(None, alias="hub.challenge"),
-# ):
-#     """Meta calls this once when you save the webhook in the dashboard."""
-#     if mode == "subscribe" and token == VERIFY_TOKEN and challenge:
-#         return Response(content=challenge, media_type="text/plain")
-#     raise HTTPException(status_code=403, detail="Verification failed")
-
-
-# @app.post("/webhook")
-# async def receive(request: Request):
-#     raw = await request.body()
-#     if not valid_signature(raw, request.headers.get("X-Hub-Signature-256")):
-#         raise HTTPException(status_code=403, detail="Bad signature")
-
-#     data = await request.json()
-#     for entry in data.get("entry", []):
-#         for change in entry.get("changes", []):
-#             value = change.get("value", {})
-#             names = {
-#                 c.get("wa_id"): c.get("profile", {}).get("name")
-#                 for c in value.get("contacts", [])
-#             }
-#             for msg in value.get("messages", []):
-#                 sender = msg["from"]  # phone number in international format
-#                 name = names.get(sender)
-#                 if msg.get("type") == "text":
-#                     text = msg["text"]["body"]
-#                     print(f"IN  {name} ({sender}): {text}")
-#                     # Step 1 only: echo back to prove the round trip works.
-#                     await send_text(sender, f"Got it: {text}")
-#                 else:
-#                     print(f"IN  {name} ({sender}): unsupported type {msg.get('type')}")
-
-#     # Always return 200 quickly or Meta will retry.
-#     return {"status": "ok"}
-
-
-# @app.get("/")
-# async def health():
-#     return {"ok": True}
