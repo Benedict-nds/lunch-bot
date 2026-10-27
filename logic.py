@@ -168,7 +168,7 @@ def handle_staff_reply(phone, name, text):
 
     db.save_order(day, phone, name, lines, notes, "complete")
     what = "; ".join(_line_label(l, by_id) for l in lines)
-    msg = f"✅ Order saved: {what}"
+    msg = f"Order saved: {what}"
     if notes:
         msg += f" ({notes})"
     if any(_is_custom(l, by_id) for l in lines):

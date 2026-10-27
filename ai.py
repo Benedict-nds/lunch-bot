@@ -1,6 +1,3 @@
-"""All AI calls live here (OpenAI version): menu parsing and order parsing.
-The menu is cleaned and split into dishes by code first, so the model only does
-the small judgement parts and cannot merge, drop or invent dishes."""
 import difflib
 import json
 import os
@@ -35,7 +32,7 @@ def _ask_json(system, user):
     return json.loads(text)
 
 
-# ---------- menu: cleaning and splitting done in code ----------
+#menu: cleaning and splitting done in code 
 
 _SMALL_CAPS = {
     "ᴀ": "a", "ʙ": "b", "ᴄ": "c", "ᴅ": "d", "ᴇ": "e", "ғ": "f", "ꜰ": "f", "ɢ": "g",
@@ -120,7 +117,7 @@ def parse_menu(raw_text):
     return items
 
 
-# ---------- staff replies ----------
+# staff replies
 
 ORDER_SYSTEM = """You read one WhatsApp reply from a staff member ordering lunch.
 You get today's menu (JSON), their current order if any, and their message.
@@ -158,7 +155,7 @@ def parse_order(items, existing, text):
         "message": text,
     }
     return _ask_json(ORDER_SYSTEM, json.dumps(payload, ensure_ascii=False))
-# """All Claude and Openai calls live here: menu parsing and order parsing."""
+
 # import json
 # import os
 # import re
