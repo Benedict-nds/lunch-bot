@@ -46,25 +46,7 @@ else:
     print(__doc__)
 
 
-"""Run these from your laptop to check the Chatbots Africa account.
 
-    export CBA_API_KEY=...            (never paste the key into chats or code)
-    python check_setup.py balance     # wallet credit
-    python check_setup.py templates   # approved templates and their IDs
-    python check_setup.py send 233XXXXXXXXX "hello"   # test message to a number
-    python check_setup.py template 233XXXXXXXXX 1593173875316322 Ama   # send the daily template to one person
-    python check_setup.py report "wamid...."   # delivery status of a sent message
-    python check_setup.py optin       # opt in everyone in staff.csv (only after staff agreed)
-"""
-# """Run these from your laptop to check the Chatbots Africa account.
-
-#     export CBA_API_KEY=...            (never paste the key into chats or code)
-#     python check_setup.py balance     # wallet credit
-#     python check_setup.py templates   # approved templates and their IDs
-#     python check_setup.py send 233XXXXXXXXX "hello"   # test message to a number
-#     python check_setup.py report "wamid...."   # delivery status of a sent message
-#     python check_setup.py optin       # opt in everyone in staff.csv (only after staff agreed)
-# """
 # import csv
 # import os
 # import sys
