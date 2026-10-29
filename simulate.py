@@ -8,6 +8,7 @@ Commands: /summary   /menu   /quit
 """
 import os
 
+os.environ.pop("DATABASE_URL", None)  # never touch the real database
 os.environ["DB_PATH"] = "sim.db"
 os.environ.setdefault("CUTOFF", "23:59")  # don't let the real cutoff block testing
 if os.path.exists("sim.db"):

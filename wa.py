@@ -1,21 +1,11 @@
-"""Chatbots Africa WhatsApp API wrapper (outgoing messages only).
-Docs: https://api.chatbotsafrica.com/developers/api-docs
-Auth is an `apikey` field in the JSON body. Never log or commit the key."""
 import os
-import re
 
 import httpx
 
+from phone import normalize_phone  
+
 BASE = os.getenv("CBA_BASE_URL", "https://api.chatbotsafrica.com/api/v1.0")
 API_KEY = os.getenv("CBA_API_KEY", "")
-
-
-def normalize_phone(raw):
-    """International format, digits only, no '+'. Turns 0241234567 into 233241234567."""
-    d = re.sub(r"\D", "", raw or "")
-    if d.startswith("0") and len(d) == 10:
-        d = "233" + d[1:]
-    return d
 
 
 async def _post(path, payload):
@@ -29,18 +19,17 @@ async def _post(path, payload):
 
 
 async def send_text(to, body):
-    """Free-form text. Only works inside the 24h window after the person messaged us."""
+    #Free-form text. Only works inside the 24h window after the person messaged us
     return await _post("/send/message", {"destination": normalize_phone(to), "message": body})
 
 
 async def send_template(to, template_id, placeholders):
-    """Business-initiated message using a Meta-approved template."""
     return await _post(
         "/send/message/template",
         {
             "destination": normalize_phone(to),
             "template_id": int(template_id),
             "type": "text",
-            "placeholder": list(placeholders),  # array, as the docs recommend
+            "placeholder": list(placeholders),  
         },
     )
