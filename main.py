@@ -155,7 +155,7 @@ async def receive(request: Request, secret: Optional[str] = Query(None)):
                 reply = await run_in_threadpool(logic.handle_staff_reply, sender, name, text)
         except Exception as e:  
             print("ERROR", repr(e))
-            reply = "Erm, something seems off, having some trouble. Kindly try again or tell HR directly."
+            reply = "Erm, something seems off twin, having some trouble. Kindly try again or tell HR directly."
         await wa.send_text(sender, reply)
 
     return {"status": "ok"}  

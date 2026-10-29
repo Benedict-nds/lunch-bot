@@ -109,7 +109,7 @@ def handle_staff_reply(phone, name, text):
     if not menu:
         return "No menu has been posted yet today. Please check back soon."
     if cutoff_passed():
-        return f"Sorry, orders closed at {cutoff_text()}. Please speak to HR."
+        return f"Sorry twin, orders closed at {cutoff_text()}. Kindly speak to HR."
 
     items = menu["items"]
     by_id = {i["id"]: i for i in items}
@@ -120,10 +120,10 @@ def handle_staff_reply(phone, name, text):
     # Cheap fast paths so simple replies never need an AI call.
     if t.lower() in MENU_WORDS:
         return ("Today's menu:\n" + format_menu(items)
-                + "\n\nReply with a number or the dish name. Reply NONE if you're not eating.")
+                + "\n\nReply with a number or the dish name twin. Reply NONE if you're not eating, no stress.")
     if t.lower() in SKIP_WORDS:
         db.save_order(day, phone, name, [], "", "skipped")
-        return "Noted, no lunch for you today."
+        return "Bet, no lunch for you today."
     if t.isdigit() and int(t) in by_id:
         parsed = {"intent": "order", "notes": "",
                   "lines": [{"item_id": int(t), "choices": {}, "custom": ""}]}
@@ -143,7 +143,7 @@ def handle_staff_reply(phone, name, text):
     intent = parsed.get("intent")
     if intent == "cancel":
         db.delete_order(day, phone)
-        return "Your order has been cancelled."
+        return "Bet,your order has been cancelled."
     if intent == "menu":
         return "Today's menu:\n" + format_menu(items) + "\n\nReply with a number or the dish name."
 
@@ -173,8 +173,8 @@ def handle_staff_reply(phone, name, text):
     if notes:
         msg += f" ({notes})"
     if any(_is_custom(l, by_id) for l in lines):
-        msg += "\n(This is a custom mix, so HR will confirm it with the kitchen.)"
-    return msg + "\nTo change it, just send a new choice."
+        msg += "\n(This is a custom mix, so HR will confirm it.)"
+    return msg + "\nTo change it, just send a new choice twin."
 
 
 def build_summary(day=None):
