@@ -18,14 +18,15 @@ import wa  # noqa: E402
 
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
 APP_SECRET = os.getenv("APP_SECRET", "")          # only if the provider signs webhooks Meta-style
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")  
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")  # add ?secret=... to the callback URL
 HR_NUMBERS = {wa.normalize_phone(n) for n in os.getenv("HR_NUMBERS", "").split(",") if n.strip()}
 TEMPLATE_ID = os.getenv("TEMPLATE_ID", "")        
 DEBUG = os.getenv("DEBUG_WEBHOOK", "1") == "1"    
 
 app = FastAPI()
 db.init()
-_seen_ids = set()  
+_seen_ids = set()  # providers retry webhooks; don't process the same message twice
+
 
 def load_staff_csv():
     path = next((p for p in ("staff.csv", "/etc/secrets/staff.csv") if os.path.exists(p)), None)
@@ -84,11 +85,30 @@ async def broadcast_menu_prompt() -> str:
         return "The broadcast template isn't set up yet (TEMPLATE_ID). Staff can still text 'menu' to the bot."
     staff = await run_in_threadpool(db.get_staff)
     if not staff:
-        return "No staff added yet."
+        return "No staff loaded yet (staff.csv)."
     for s in staff:
         await wa.send_template(s["phone"], TEMPLATE_ID, [s["name"] or "there"])
         await asyncio.sleep(0.2)
     return f"Menu prompt sent to {len(staff)} staff."
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+async def maybe_send_early_summary():
+    """As soon as everyone has replied (before the cutoff), send HR the summary once."""
+    day = logic.today()
+    key = f"early_sent:{day}"
+    if logic.cutoff_passed() or await run_in_threadpool(db.get_flag, key):
+        return
+    if not await run_in_threadpool(logic.all_replied, day, HR_NUMBERS):
+        return
+    text = await run_in_threadpool(logic.build_summary)
+    await run_in_threadpool(db.set_flag, key, _digest(text))
+    for hr in HR_NUMBERS:
+        await wa.send_text(hr, "Everyone has replied. Here is the summary:\n\n" + text
+                           + f"\n\n(Staff can still change orders until {logic.cutoff_text()}.)")
 
 
 async def handle_hr(text: str) -> str:
@@ -98,7 +118,7 @@ async def handle_hr(text: str) -> str:
         if not raw:
             return "Send it like this:\nMenu: paste today's menu"
         items = await run_in_threadpool(logic.set_menu, raw)
-        return ("Menu saved \n\n" + logic.format_menu(items)
+        return ("Menu saved\n\n" + logic.format_menu(items)
                 + "\n\nReply 'Send' to send it to all staff, or 'Summary' to see orders so far.")
     if lower.startswith("summary"):
         return await run_in_threadpool(logic.build_summary)
@@ -107,8 +127,8 @@ async def handle_hr(text: str) -> str:
     reply = await run_in_threadpool(logic.staff_command, text)
     if reply:
         return reply
-    return ("These are your commands:\n• Menu: <menu text>\n• Send\n• Summary\n"
-            "• Staff\n• Add Ama 0241234567\n• Remove Ama")
+    return ("Hi, Eunice, these are your commands:\n• Menu: menu text\n• Send (to broadcast to everyone)\n• Summary (to see everyone's order)\n"
+            "• Staff (to see staff list) \n• Add say Tutu 0241234567 (adds to staff list) \n• Remove say Godsway")
 
 
 @app.get("/webhook")
@@ -143,7 +163,7 @@ async def receive(request: Request, secret: Optional[str] = Query(None)):
         _seen_ids.add(msg_id)
         sender = wa.normalize_phone(sender)
         if not text:
-            await wa.send_text(sender, "Sorry, but I can only read text messages. Please type your order.")
+            await wa.send_text(sender, "Sorry, I can only read text messages. Please type your order.")
             continue
         print(f"IN  {profile_name} ({sender}): {text}")
         try:
@@ -153,12 +173,17 @@ async def receive(request: Request, secret: Optional[str] = Query(None)):
                 await run_in_threadpool(db.ensure_staff, sender, profile_name or sender)
                 name = await run_in_threadpool(db.staff_name, sender) or profile_name or sender
                 reply = await run_in_threadpool(logic.handle_staff_reply, sender, name, text)
-        except Exception as e:  
+        except Exception as e:  # never let one bad message crash the webhook
             print("ERROR", repr(e))
-            reply = "Erm, something seems off twin, having some trouble. Kindly try again or tell HR directly."
+            reply = "Erm, something went wrong on my side. Please try again or tell HR."
         await wa.send_text(sender, reply)
+        if sender not in HR_NUMBERS:
+            try:
+                await maybe_send_early_summary()
+            except Exception as e:
+                print("EARLY SUMMARY ERROR", repr(e))
 
-    return {"status": "ok"}  
+    return {"status": "ok"}  # always answer 200 quickly or the provider retries
 
 
 async def summary_scheduler():
@@ -171,6 +196,13 @@ async def summary_scheduler():
             if 0 <= logic.minutes_since_cutoff() < 10 and not db.get_flag(key) and db.get_menu(day):
                 db.set_flag(key, "1")
                 text = await run_in_threadpool(logic.build_summary)
+                early = db.get_flag(f"early_sent:{day}")
+                if early and early == _digest(text):
+                    text = f"Cutoff time reached ({logic.cutoff_text()}). No changes since the earlier summary, so that one is final."
+                elif early:
+                    text = "FINAL summary (some orders changed since the earlier one):\n\n" + text
+                else:
+                    text = f"Cutoff reached ({logic.cutoff_text()}). Final summary:\n\n" + text
                 for hr in HR_NUMBERS:
                     await wa.send_text(hr, text)
         except Exception as e:
@@ -179,8 +211,8 @@ async def summary_scheduler():
 
 @app.on_event("startup")
 async def startup():
-    if db.count_staff() == 0:  
-        print("Staff imported :", load_staff_csv())
+    if db.count_staff() == 0:  # first run only; after that HR manages the list by text
+        print("Staff imported from staff.csv:", load_staff_csv())
     print("Storage:", "Postgres" if db.PG else "SQLite file", "| staff:", db.count_staff())
     asyncio.create_task(summary_scheduler())
 
