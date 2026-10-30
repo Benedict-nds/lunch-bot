@@ -1,3 +1,4 @@
+"""Business logic: no WhatsApp or Claude details in here, so it is easy to test."""
 import os
 import re
 from collections import Counter
@@ -9,7 +10,7 @@ from phone import normalize_phone
 
 
 def _now():
-    return datetime.utcnow() 
+    return datetime.utcnow()  # Ghana is on GMT (UTC+0) all year
 
 
 def today():
@@ -17,7 +18,7 @@ def today():
 
 
 def cutoff_text():
-    return os.getenv("CUTOFF", "10:30")
+    return os.getenv("CUTOFF", "9:00")
 
 
 def minutes_since_cutoff():
@@ -30,9 +31,8 @@ def cutoff_passed():
     return minutes_since_cutoff() >= 0
 
 
-MENU_WORDS = {"menu", "view menu", "hi", "hello", "hey", "todays menu", "today's menu", "what's for lunch", "wagwan wi di lunch",
-              "what we dey chop", "wey chow dey"}
-SKIP_WORDS = {"none", "not eating", "skip", "no lunch", "ano dey chop", "no lie", "echill chale"}
+MENU_WORDS = {"menu", "view menu", "hi", "hello", "hey", "todays menu", "today's menu"}
+SKIP_WORDS = {"none", "not eating", "skip", "no lunch"}
 
 
 def format_menu(items):
@@ -109,7 +109,7 @@ def handle_staff_reply(phone, name, text):
     if not menu:
         return "No menu has been posted yet today. Please check back soon."
     if cutoff_passed():
-        return f"Sorry twin, orders closed at {cutoff_text()}. Kindly speak to HR."
+        return f"Sorry, orders closed at {cutoff_text()}. Please speak to HR."
 
     items = menu["items"]
     by_id = {i["id"]: i for i in items}
@@ -120,10 +120,10 @@ def handle_staff_reply(phone, name, text):
     # Cheap fast paths so simple replies never need an AI call.
     if t.lower() in MENU_WORDS:
         return ("Today's menu:\n" + format_menu(items)
-                + "\n\nReply with a number or the dish name twin. Reply NONE if you're not eating, no stress.")
+                + "\n\nReply with a number or the dish name. Reply NONE if you're not eating.")
     if t.lower() in SKIP_WORDS:
         db.save_order(day, phone, name, [], "", "skipped")
-        return "Bet, no lunch for you today."
+        return "Noted, no lunch for you today."
     if t.isdigit() and int(t) in by_id:
         parsed = {"intent": "order", "notes": "",
                   "lines": [{"item_id": int(t), "choices": {}, "custom": ""}]}
@@ -143,7 +143,7 @@ def handle_staff_reply(phone, name, text):
     intent = parsed.get("intent")
     if intent == "cancel":
         db.delete_order(day, phone)
-        return "Bet,your order has been cancelled."
+        return "Your order has been cancelled."
     if intent == "menu":
         return "Today's menu:\n" + format_menu(items) + "\n\nReply with a number or the dish name."
 
@@ -169,12 +169,12 @@ def handle_staff_reply(phone, name, text):
 
     db.save_order(day, phone, name, lines, notes, "complete")
     what = "; ".join(_line_label(l, by_id) for l in lines)
-    msg = f"Order saved: {what}"
+    msg = f"✅ Order saved: {what}"
     if notes:
         msg += f" ({notes})"
     if any(_is_custom(l, by_id) for l in lines):
-        msg += "\n(This is a custom mix, so HR will confirm it.)"
-    return msg + "\nTo change it, just send a new choice twin."
+        msg += "\n(This is a custom mix, so HR will confirm it with the kitchen.)"
+    return msg + "\nTo change it, just send a new choice."
 
 
 def build_summary(day=None):
@@ -229,14 +229,14 @@ def staff_command(text):
     if low == "staff":
         rows = sorted(db.get_staff(), key=lambda s: (s["name"] or "").lower())
         if not rows:
-            return "No staff yet. Add someone like this:\nAdd Tutu 0241234567"
+            return "No staff yet. Add someone like this:\nAdd Ama 0241234567"
         return f"{len(rows)} staff:\n" + "\n".join(f"- {s['name']} ({s['phone']})" for s in rows)
     if low.startswith("add "):
         m = re.match(r"^(.*?)[\s:,]+(\+?\d[\d\s\-()]{7,})$", t[4:].strip())
         phone = normalize_phone(m.group(2)) if m else ""
         name = m.group(1).strip() if m else ""
         if not name or not (11 <= len(phone) <= 15):
-            return "Use: Add Godsway 0241234567 (name, then phone number)"
+            return "Use: Add Ama 0241234567 (name, then phone number)"
         db.upsert_staff(phone, name)
         return f"Added {name} ({phone})."
     if low.startswith("remove "):
@@ -252,3 +252,13 @@ def staff_command(text):
         db.remove_staff(found[0]["phone"])
         return f"Removed {found[0]['name']} ({found[0]['phone']})."
     return None
+
+
+def all_replied(day=None, exclude=()):
+    """True when every staff member (except `exclude`, e.g. HR) has a finished order or said NONE."""
+    day = day or today()
+    staff = [s for s in db.get_staff() if s["phone"] not in exclude]
+    if not staff or not db.get_menu(day):
+        return False
+    done = {o["phone"] for o in db.get_orders(day) if o["status"] in ("complete", "skipped")}
+    return all(s["phone"] in done for s in staff)
