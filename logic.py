@@ -1,4 +1,3 @@
-"""Business logic: no WhatsApp or Claude details in here, so it is easy to test."""
 import os
 import re
 from collections import Counter
@@ -17,6 +16,7 @@ def today():
     return _now().strftime("%Y-%m-%d")
 
 
+
 def cutoff_text():
     return os.getenv("CUTOFF", "9:00")
 
@@ -31,8 +31,9 @@ def cutoff_passed():
     return minutes_since_cutoff() >= 0
 
 
-MENU_WORDS = {"menu", "view menu", "hi", "hello", "hey", "todays menu", "today's menu"}
-SKIP_WORDS = {"none", "not eating", "skip", "no lunch"}
+MENU_WORDS = {"menu", "view menu", "hi", "hello", "hey", "todays menu", "today's menu", "what's for lunch", "wagwan wi di lunch",
+              "what we dey chop", "wey chow dey"}
+SKIP_WORDS = {"none", "not eating", "skip", "no lunch", "ano dey chop", "no lie", "echill chale"}
 
 
 def format_menu(items):
@@ -169,11 +170,11 @@ def handle_staff_reply(phone, name, text):
 
     db.save_order(day, phone, name, lines, notes, "complete")
     what = "; ".join(_line_label(l, by_id) for l in lines)
-    msg = f"✅ Order saved: {what}"
+    msg = f"Order saved: {what}"
     if notes:
         msg += f" ({notes})"
     if any(_is_custom(l, by_id) for l in lines):
-        msg += "\n(This is a custom mix, so HR will confirm it with the kitchen.)"
+        msg += "\n(This is a custom mix, so HR will confirm it.)"
     return msg + "\nTo change it, just send a new choice."
 
 
@@ -229,14 +230,14 @@ def staff_command(text):
     if low == "staff":
         rows = sorted(db.get_staff(), key=lambda s: (s["name"] or "").lower())
         if not rows:
-            return "No staff yet. Add someone like this:\nAdd Ama 0241234567"
+            return "No staff yet. Add someone like this:\nAdd Tutu 0241234567"
         return f"{len(rows)} staff:\n" + "\n".join(f"- {s['name']} ({s['phone']})" for s in rows)
     if low.startswith("add "):
         m = re.match(r"^(.*?)[\s:,]+(\+?\d[\d\s\-()]{7,})$", t[4:].strip())
         phone = normalize_phone(m.group(2)) if m else ""
         name = m.group(1).strip() if m else ""
         if not name or not (11 <= len(phone) <= 15):
-            return "Use: Add Ama 0241234567 (name, then phone number)"
+            return "Use: Add Godsway 0241234567 (name, then phone number)"
         db.upsert_staff(phone, name)
         return f"Added {name} ({phone})."
     if low.startswith("remove "):
