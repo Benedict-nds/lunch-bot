@@ -201,6 +201,22 @@ async def receive(request: Request, secret: Optional[str] = Query(None)):
 
     return {"status": "ok"}  # always answer 200 quickly or the provider retries
 
+async def maybe_send_reminders():
+    """Once per day, shortly before closing, resend the menu prompt to staff who haven't ordered."""
+    day = logic.today()
+    if not TEMPLATE_ID or not await run_in_threadpool(logic.reminder_due, day):
+        return
+    await run_in_threadpool(db.set_flag, f"reminder_sent:{day}", "1")  # set first: never send twice
+    todo = await run_in_threadpool(logic.outstanding_staff, day)
+    for s in todo:
+        await wa.send_template(s["phone"], TEMPLATE_ID, [s["name"] or "there"])
+        await asyncio.sleep(0.2)
+    if todo:
+        close = await run_in_threadpool(logic.get_close, day)
+        names = ", ".join(sorted(s["name"] or s["phone"] for s in todo))
+        for hr in HR_NUMBERS:
+            await wa.send_text(hr, f"Reminder sent to {len(todo)} staff who haven't ordered or declined yet: {names}. "
+                                   f"Orders close at {logic.fmt_time(close)}.")
 
 async def maybe_send_cutoff_summary():
     """When orders close, push the summary to HR (once per closing time)."""
