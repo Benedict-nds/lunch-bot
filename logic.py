@@ -18,7 +18,7 @@ def today():
 
 
 def cutoff_text():
-    return os.getenv("CUTOFF", "8:45")
+    return os.getenv("CUTOFF", "9:30")
 
 
 def minutes_since_cutoff():
