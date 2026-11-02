@@ -141,7 +141,7 @@ async def handle_hr(text: str) -> str:
     if reply:
         return reply
     return ("Hi, Eunice, these are your commands:\n• Menu: menu text\n• Send (to broadcast to everyone)\n• Summary (to see everyone's order)\n"
-            "• Staff (to see staff list) \n• Add say Tutu 0241234567 (adds to staff list) \n• Remove say Godsway (removes from staff list) \n• Extend 30 (extends order window by 30 minutes)")
+            "• Staff (to see staff list) \n• Add say Tutu 0241234567 (adds to staff list) \n• Remove say Godsway (removes from staff list) \n• Extend 5 (extends order window by 5 minutes)")
 
 
 @app.get("/webhook")
