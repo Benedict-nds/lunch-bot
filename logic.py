@@ -1,7 +1,7 @@
 import os
 import re
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 
 import ai
 import db
@@ -9,26 +9,65 @@ from phone import normalize_phone
 
 
 def _now():
-    return datetime.utcnow()  # Ghana is on GMT (UTC+0) all year
+    return datetime.now(timezone.utc)  # Ghana is on GMT (UTC+0) all year
 
 
 def today():
     return _now().strftime("%Y-%m-%d")
 
 
-
-def cutoff_text():
-    return os.getenv("CUTOFF", "10:05")
-
-
-def minutes_since_cutoff():
-    hh, mm = cutoff_text().split(":")
-    n = _now()
-    return (n.hour * 60 + n.minute) - (int(hh) * 60 + int(mm))
+# order window: orders close WINDOW_MIN minutes after HR sends the menu to staff 
+WINDOW_MIN = int(os.getenv("ORDER_WINDOW_MIN", "45"))
 
 
-def cutoff_passed():
-    return minutes_since_cutoff() >= 0
+def _ts():
+    return int(_now().timestamp())
+
+
+def fmt_time(ts):
+    return datetime.fromtimestamp(int(ts), timezone.utc).strftime("%H:%M")
+
+
+def seconds_since(ts):
+    return _ts() - int(ts)
+
+
+def get_close(day=None):
+    v = db.get_flag(f"close_at:{day or today()}")
+    return int(v) if v else None
+
+
+def orders_closed(day=None):
+    c = get_close(day)
+    return c is not None and _ts() >= c
+
+
+def _close_note(day=None):
+    c = get_close(day)
+    return f"\n\nOrders close at {fmt_time(c)}." if c else ""
+
+
+def mark_broadcast(day=None):
+    """HR sent the menu to staff. The first time, start the clock; later sends never move it."""
+    day = day or today()
+    if db.get_flag(f"broadcast_done:{day}"):
+        return get_close(day), False
+    close = _ts() + WINDOW_MIN * 60
+    db.set_flag(f"broadcast_done:{day}", "1")
+    db.set_flag(f"close_at:{day}", str(close))
+    return close, True
+
+
+def extend_orders(minutes, day=None):
+    """Reopen / extend orders by `minutes` and let the closing summary be sent again."""
+    day = day or today()
+    if not db.get_menu(day):
+        return "There is no menu for today yet."
+    minutes = max(1, min(int(minutes), 240))
+    new_close = max(get_close(day) or 0, _ts()) + minutes * 60
+    db.set_flag(f"close_at:{day}", str(new_close))
+    db.set_flag(f"summary_sent:{day}", "")
+    return f"Orders now close at {fmt_time(new_close)}."
 
 
 MENU_WORDS = {"menu", "view menu", "hi", "hello", "hey", "todays menu", "today's menu", "what's for lunch", "wagwan wi di lunch",
@@ -47,7 +86,12 @@ def format_menu(items):
 
 def set_menu(raw_text):
     items = ai.parse_menu(raw_text)
-    db.save_menu(today(), raw_text, items)
+    day = today()
+    db.save_menu(day, raw_text, items)
+    if not db.get_flag(f"broadcast_done:{day}"):
+        # Provisional closing time (for staff who text "menu" themselves).
+        # HR's "Send" restarts the clock from the moment staff are messaged.
+        db.set_flag(f"close_at:{day}", str(_ts() + WINDOW_MIN * 60))
     return items
 
 
@@ -109,8 +153,8 @@ def handle_staff_reply(phone, name, text):
     menu = db.get_menu(day)
     if not menu:
         return "No menu has been posted yet today. Please check back soon."
-    if cutoff_passed():
-        return f"Sorry, orders closed at {cutoff_text()}. Please speak to HR."
+    if orders_closed(day):
+        return f"Sorry, orders closed at {fmt_time(get_close(day))}. Please speak to HR."
 
     items = menu["items"]
     by_id = {i["id"]: i for i in items}
@@ -121,7 +165,8 @@ def handle_staff_reply(phone, name, text):
     # Cheap fast paths so simple replies never need an AI call.
     if t.lower() in MENU_WORDS:
         return ("Today's menu:\n" + format_menu(items)
-                + "\n\nReply with a number or the dish name. Reply NONE if you're not eating.")
+                + "\n\nReply with a number or the dish name. Reply NONE if you're not eating."
+                + _close_note(day))
     if t.lower() in SKIP_WORDS:
         db.save_order(day, phone, name, [], "", "skipped")
         return "Noted, no lunch for you today."
@@ -146,7 +191,7 @@ def handle_staff_reply(phone, name, text):
         db.delete_order(day, phone)
         return "Your order has been cancelled."
     if intent == "menu":
-        return "Today's menu:\n" + format_menu(items) + "\n\nReply with a number or the dish name."
+        return "Today's menu:\n" + format_menu(items) + "\n\nReply with a number or the dish name." + _close_note(day)
 
     not_on_menu = parsed.get("not_on_menu") or []
     if not_on_menu:
@@ -174,7 +219,7 @@ def handle_staff_reply(phone, name, text):
     if notes:
         msg += f" ({notes})"
     if any(_is_custom(l, by_id) for l in lines):
-        msg += "\n(This is a custom mix, so HR will confirm it.)"
+        msg += "\n(This is a custom mix, so HR will confirm it with the kitchen.)"
     return msg + "\nTo change it, just send a new choice."
 
 
@@ -230,14 +275,14 @@ def staff_command(text):
     if low == "staff":
         rows = sorted(db.get_staff(), key=lambda s: (s["name"] or "").lower())
         if not rows:
-            return "No staff yet. Add someone like this:\nAdd Tutu 0241234567"
+            return "No staff yet. Add someone like this:\nAdd Ama 0241234567"
         return f"{len(rows)} staff:\n" + "\n".join(f"- {s['name']} ({s['phone']})" for s in rows)
     if low.startswith("add "):
         m = re.match(r"^(.*?)[\s:,]+(\+?\d[\d\s\-()]{7,})$", t[4:].strip())
         phone = normalize_phone(m.group(2)) if m else ""
         name = m.group(1).strip() if m else ""
         if not name or not (11 <= len(phone) <= 15):
-            return "Use: Add Godsway 0241234567 (name, then phone number)"
+            return "Use: Add Ama 0241234567 (name, then phone number)"
         db.upsert_staff(phone, name)
         return f"Added {name} ({phone})."
     if low.startswith("remove "):
@@ -263,3 +308,23 @@ def all_replied(day=None, exclude=()):
         return False
     done = {o["phone"] for o in db.get_orders(day) if o["status"] in ("complete", "skipped")}
     return all(s["phone"] in done for s in staff)
+
+
+def is_hr_command(text):
+    """True only for exact HR commands, so HR can also order lunch like anyone else."""
+    t = text.strip()
+    low = t.lower()
+    lines = [l for l in low.splitlines() if l.strip()]
+    first = lines[0].strip() if lines else ""
+    if first.startswith("menu:") or (first == "menu" and len(lines) > 1):
+        return True
+    if low in ("send", "summary", "staff"):
+        return True
+    if re.match(r"^extend\s+\d{1,3}$", low):
+        return True
+    if re.match(r"^add\s+.+?[\s:,]+\+?\d[\d\s\-()]{7,}$", low):
+        return True
+    if low.startswith("remove "):
+        target = t[7:].strip()
+        return bool(db.find_staff(target) or (normalize_phone(target) and db.find_staff(normalize_phone(target))))
+    return False

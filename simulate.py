@@ -10,7 +10,7 @@ import os
 
 os.environ.pop("DATABASE_URL", None)  # never touch the real database
 os.environ["DB_PATH"] = "sim.db"
-os.environ.setdefault("CUTOFF", "23:59")  # don't let the real cutoff block testing
+os.environ.setdefault("ORDER_WINDOW_MIN", "600")  # keep orders open while testing
 if os.path.exists("sim.db"):
     os.remove("sim.db")
 

@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -79,17 +80,22 @@ def extract_messages(data):
 
 
 async def broadcast_menu_prompt() -> str:
-    if not await run_in_threadpool(db.get_menu, logic.today()):
+    day = logic.today()
+    if not await run_in_threadpool(db.get_menu, day):
         return "Send today's menu first (Menu: ...), then reply Send."
     if not TEMPLATE_ID:
         return "The broadcast template isn't set up yet (TEMPLATE_ID). Staff can still text 'menu' to the bot."
     staff = await run_in_threadpool(db.get_staff)
     if not staff:
-        return "No staff loaded yet (staff.csv)."
+        return "No staff loaded yet. Add people with: Add Tutu 0241234567"
     for s in staff:
         await wa.send_template(s["phone"], TEMPLATE_ID, [s["name"] or "there"])
         await asyncio.sleep(0.2)
-    return f"Menu prompt sent to {len(staff)} staff."
+    close, first = await run_in_threadpool(logic.mark_broadcast, day)
+    when = logic.fmt_time(close)
+    if first:
+        return f"Menu prompt sent to {len(staff)} staff. Orders close at {when}."
+    return f"Menu prompt re-sent to {len(staff)} staff. Orders still close at {when}."
 
 
 def _digest(text: str) -> str:
@@ -97,38 +103,45 @@ def _digest(text: str) -> str:
 
 
 async def maybe_send_early_summary():
-    """As soon as everyone has replied (before the cutoff), send HR the summary once."""
+    """As soon as everyone on the staff list has replied (before closing), send HR the summary once."""
     day = logic.today()
     key = f"early_sent:{day}"
-    if logic.cutoff_passed() or await run_in_threadpool(db.get_flag, key):
+    if await run_in_threadpool(logic.orders_closed, day) or await run_in_threadpool(db.get_flag, key):
         return
-    if not await run_in_threadpool(logic.all_replied, day, HR_NUMBERS):
+    if not await run_in_threadpool(logic.all_replied, day):
         return
     text = await run_in_threadpool(logic.build_summary)
     await run_in_threadpool(db.set_flag, key, _digest(text))
+    close = await run_in_threadpool(logic.get_close, day)
+    until = f" until {logic.fmt_time(close)}" if close else ""
     for hr in HR_NUMBERS:
         await wa.send_text(hr, "Everyone has replied. Here is the summary:\n\n" + text
-                           + f"\n\n(Staff can still change orders until {logic.cutoff_text()}.)")
+                           + f"\n\n(Staff can still change orders{until}.)")
 
 
 async def handle_hr(text: str) -> str:
     lower = text.strip().lower()
-    if lower.startswith("menu"):
+    first = next((l.strip() for l in lower.splitlines() if l.strip()), "")
+    if first.startswith("menu"):
         raw = text.strip()[4:].lstrip(" :\n")
         if not raw:
             return "Send it like this:\nMenu: paste today's menu"
         items = await run_in_threadpool(logic.set_menu, raw)
         return ("Menu saved\n\n" + logic.format_menu(items)
-                + "\n\nReply 'Send' to send it to all staff, or 'Summary' to see orders so far.")
-    if lower.startswith("summary"):
+                + f"\n\nReply 'Send' to message all staff. Orders close {logic.WINDOW_MIN} minutes after you send it."
+                + "\nReply 'Summary' any time to see orders so far.")
+    if lower == "summary":
         return await run_in_threadpool(logic.build_summary)
-    if lower.startswith("send"):
+    if lower == "send":
         return await broadcast_menu_prompt()
+    m = re.match(r"^extend\s+(\d{1,3})$", lower)
+    if m:
+        return await run_in_threadpool(logic.extend_orders, int(m.group(1)))
     reply = await run_in_threadpool(logic.staff_command, text)
     if reply:
         return reply
     return ("Hi, Eunice, these are your commands:\n• Menu: menu text\n• Send (to broadcast to everyone)\n• Summary (to see everyone's order)\n"
-            "• Staff (to see staff list) \n• Add say Tutu 0241234567 (adds to staff list) \n• Remove say Godsway")
+            "• Staff (to see staff list) \n• Add say Tutu 0241234567 (adds to staff list) \n• Remove say Godsway (removes from staff list) \n• Extend 30 (extends order window by 30 minutes)")
 
 
 @app.get("/webhook")
@@ -161,23 +174,26 @@ async def receive(request: Request, secret: Optional[str] = Query(None)):
         if msg_id and msg_id in _seen_ids:
             continue
         _seen_ids.add(msg_id)
+        ordering = False
         sender = wa.normalize_phone(sender)
         if not text:
             await wa.send_text(sender, "Sorry, I can only read text messages. Please type your order.")
             continue
         print(f"IN  {profile_name} ({sender}): {text}")
         try:
-            if sender in HR_NUMBERS:
+            if sender in HR_NUMBERS and await run_in_threadpool(logic.is_hr_command, text):
                 reply = await handle_hr(text)
             else:
-                await run_in_threadpool(db.ensure_staff, sender, profile_name or sender)
+                ordering = True  # HR can order lunch too: anything that is not an exact command
+                if sender not in HR_NUMBERS:
+                    await run_in_threadpool(db.ensure_staff, sender, profile_name or sender)
                 name = await run_in_threadpool(db.staff_name, sender) or profile_name or sender
                 reply = await run_in_threadpool(logic.handle_staff_reply, sender, name, text)
         except Exception as e:  # never let one bad message crash the webhook
             print("ERROR", repr(e))
             reply = "Erm, something went wrong on my side. Please try again or tell HR."
         await wa.send_text(sender, reply)
-        if sender not in HR_NUMBERS:
+        if ordering:
             try:
                 await maybe_send_early_summary()
             except Exception as e:
@@ -186,25 +202,34 @@ async def receive(request: Request, secret: Optional[str] = Query(None)):
     return {"status": "ok"}  # always answer 200 quickly or the provider retries
 
 
+async def maybe_send_cutoff_summary():
+    """When orders close, push the summary to HR (once per closing time)."""
+    day = logic.today()
+    key = f"summary_sent:{day}"
+    close = await run_in_threadpool(logic.get_close, day)
+    if not close or logic.seconds_since(close) < 0 or logic.seconds_since(close) > 3 * 3600:
+        return
+    if await run_in_threadpool(db.get_flag, key) or not await run_in_threadpool(db.get_menu, day):
+        return
+    await run_in_threadpool(db.set_flag, key, "1")
+    text = await run_in_threadpool(logic.build_summary)
+    early = await run_in_threadpool(db.get_flag, f"early_sent:{day}")
+    when = logic.fmt_time(close)
+    if early and early == _digest(text):
+        text = f"Orders closed at {when}. No changes since the earlier summary, so that one is final."
+    elif early:
+        text = f"Orders closed at {when}. FINAL summary (some orders changed since the earlier one):\n\n" + text
+    else:
+        text = f"Orders closed at {when}. Final summary:\n\n" + text
+    for hr in HR_NUMBERS:
+        await wa.send_text(hr, text)
+
+
 async def summary_scheduler():
-    """At the cutoff time, push the summary to HR (once per day)."""
     while True:
         await asyncio.sleep(30)
         try:
-            day = logic.today()
-            key = f"summary_sent:{day}"
-            if 0 <= logic.minutes_since_cutoff() < 10 and not db.get_flag(key) and db.get_menu(day):
-                db.set_flag(key, "1")
-                text = await run_in_threadpool(logic.build_summary)
-                early = db.get_flag(f"early_sent:{day}")
-                if early and early == _digest(text):
-                    text = f"Cutoff time reached ({logic.cutoff_text()}). No changes since the earlier summary, so that one is final."
-                elif early:
-                    text = "FINAL summary (some orders changed since the earlier one):\n\n" + text
-                else:
-                    text = f"Cutoff reached ({logic.cutoff_text()}). Final summary:\n\n" + text
-                for hr in HR_NUMBERS:
-                    await wa.send_text(hr, text)
+            await maybe_send_cutoff_summary()
         except Exception as e:
             print("SCHEDULER ERROR", repr(e))
 
