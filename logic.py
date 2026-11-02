@@ -18,7 +18,7 @@ def today():
 
 # order window: orders close WINDOW_MIN minutes after HR sends the menu to staff 
 WINDOW_MIN = int(os.getenv("ORDER_WINDOW_MIN", "45"))
-
+REMINDER_BEFORE_MIN = int(os.getenv("REMINDER_BEFORE_MIN", "15"))  # one reminder this long before closing
 
 def _ts():
     return int(_now().timestamp())
@@ -328,3 +328,24 @@ def is_hr_command(text):
         target = t[7:].strip()
         return bool(db.find_staff(target) or (normalize_phone(target) and db.find_staff(normalize_phone(target))))
     return False
+
+def outstanding_staff(day=None):
+    """Staff with no finished order and no NONE reply (includes people with a pending question)."""
+    day = day or today()
+    done = {o["phone"] for o in db.get_orders(day) if o["status"] in ("complete", "skipped")}
+    return [s for s in db.get_staff() if s["phone"] not in done]
+ 
+ 
+def reminder_due(day=None):
+    """True once per day: HR has sent the menu, and closing is within REMINDER_BEFORE_MIN minutes."""
+    day = day or today()
+    close = get_close(day)
+    if not close or not db.get_menu(day):
+        return False
+    if not db.get_flag(f"broadcast_done:{day}") or db.get_flag(f"reminder_sent:{day}"):
+        return False
+    sent_at = db.get_flag(f"broadcast_at:{day}")
+    if sent_at and _ts() - int(sent_at) < 300:  # never remind within 5 minutes of the prompt itself
+        return False
+    left = close - _ts()
+    return 0 < left <= REMINDER_BEFORE_MIN * 60
