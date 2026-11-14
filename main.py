@@ -245,6 +245,7 @@ async def summary_scheduler():
     while True:
         await asyncio.sleep(30)
         try:
+            await maybe_send_reminders()
             await maybe_send_cutoff_summary()
         except Exception as e:
             print("SCHEDULER ERROR", repr(e))
