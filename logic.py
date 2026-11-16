@@ -19,6 +19,8 @@ def today():
 # order window: orders close WINDOW_MIN minutes after HR sends the menu to staff 
 WINDOW_MIN = int(os.getenv("ORDER_WINDOW_MIN", "45"))
 REMINDER_BEFORE_MIN = int(os.getenv("REMINDER_BEFORE_MIN", "15"))  # one reminder this long before closing
+POPULAR_MIN_ORDERS = int(os.getenv("POPULAR_MIN_ORDERS", "3"))
+POPULAR_TOP = 3
 
 def _ts():
     return int(_now().timestamp())
@@ -139,6 +141,23 @@ def _is_custom(ln, by_id):
     return ln.get("item_id") not in by_id
 
 
+def popular_picks(day, by_id) -> str:
+    """Return the most ordered menu choices, without identifying staff."""
+    orders = [o for o in db.get_orders(day) if o["status"] == "complete"]
+    if len(orders) < POPULAR_MIN_ORDERS:
+        return ""
+    counts = Counter()
+    for order in orders:
+        for ln in order["lines"]:
+            if not _is_custom(ln, by_id):
+                counts[(ln["item_id"], _line_label(ln, by_id))] += 1
+    top = sorted(counts, key=lambda k: (-counts[k], k[0], k[1]))[:POPULAR_TOP]
+    if not top:
+        return ""
+    return "Popular so far: " + ", ".join(
+        f"{label} ({counts[(item_id, label)]})" for item_id, label in top)
+
+
 def _match_choice(item, text):
     t = text.strip().lower()
     for o in _missing(item, {}):
@@ -164,9 +183,10 @@ def handle_staff_reply(phone, name, text):
 
     # Cheap fast paths so simple replies never need an AI call.
     if t.lower() in MENU_WORDS:
+        popular = popular_picks(day, by_id)
         return ("Today's menu:\n" + format_menu(items)
                 + "\n\nReply with a number or the dish name. Reply NONE if you're not eating."
-                + _close_note(day))
+                + _close_note(day) + ("\n" + popular if popular else ""))
     if t.lower() in SKIP_WORDS:
         db.save_order(day, phone, name, [], "", "skipped")
         return "Noted, no lunch for you today."
@@ -191,7 +211,9 @@ def handle_staff_reply(phone, name, text):
         db.delete_order(day, phone)
         return "Your order has been cancelled."
     if intent == "menu":
-        return "Today's menu:\n" + format_menu(items) + "\n\nReply with a number or the dish name." + _close_note(day)
+        popular = popular_picks(day, by_id)
+        return ("Today's menu:\n" + format_menu(items) + "\n\nReply with a number or the dish name."
+                + _close_note(day) + ("\n" + popular if popular else ""))
 
     not_on_menu = parsed.get("not_on_menu") or []
     if not_on_menu:
